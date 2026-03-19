@@ -18,34 +18,63 @@ def build_html(data: dict, username: str) -> str:
     p = data["profile"]
     s = data["stats"]
     heatmap = data["heatmap"]
+    heatmap_detail = data.get("heatmap_detail", {})
     langs = data["languages"]
     recent = data["recent"]
 
-    # Heatmap grid data
+    CELL, GAP, COLS = 11, 2, 53
+
     today = datetime.now(timezone.utc).date()
     start = today - timedelta(days=364)
     dow = start.weekday()
     start = start - timedelta(days=(dow + 1) % 7)
 
-    CELL, GAP, COLS = 11, 2, 53
+    # ── Heatmap cells ──────────────────────────────────────────────
     cells = []
     for col in range(COLS):
         for row in range(7):
             day = start + timedelta(days=col * 7 + row)
             if day > today:
-                cells.append(f'<div class="cell empty"></div>')
+                cells.append('<div class="cell empty"></div>')
                 continue
             ds = str(day)
             count = heatmap.get(ds, 0)
+            detail = heatmap_detail.get(ds, {})
+            created = detail.get("created", 0)
+            updated = detail.get("updated", 0)
             color = hc(count)
+
+            # Rich tooltip
+            if count == 0:
+                tip = f"{ds}: No activity"
+            else:
+                parts = []
+                if created: parts.append(f"{created} new")
+                if updated: parts.append(f"{updated} updated")
+                tip = f"{ds}: {count} action{'s' if count != 1 else ''} ({', '.join(parts)})"
+
             cells.append(
-                f'<div class="cell" style="background:{color}" '
-                f'title="{ds}: {count} gist{"s" if count!=1 else ""}"></div>'
+                f'<div class="cell" style="background:{color}" data-tip="{tip}"></div>'
             )
 
     heat_html = "\n".join(cells)
 
-    # Language bars
+    # ── Month labels ───────────────────────────────────────────────
+    # Build list of (col_index, month_label) for first col of each new month
+    month_labels = []
+    prev_month = None
+    for col in range(COLS):
+        day = start + timedelta(days=col * 7)
+        if day.month != prev_month:
+            prev_month = day.month
+            month_labels.append((col, day.strftime("%b")))
+
+    month_label_html = ""
+    for col, label in month_labels:
+        left = col * (CELL + GAP)
+        month_label_html += f'<span class="month-label" style="left:{left}px">{label}</span>'
+
+    # ── Language bars ──────────────────────────────────────────────
     total_lang = sum(c for _, c in langs) or 1
     lang_bars = ""
     for lang, count in langs:
@@ -61,12 +90,12 @@ def build_html(data: dict, username: str) -> str:
           <div class="lang-pct">{count} <span>({pct}%)</span></div>
         </div>"""
 
-    # Recent gists
+    # ── Recent gists ───────────────────────────────────────────────
     recent_html = ""
     for g in recent:
         pub_badge = (
-            f'<span class="badge pub">public</span>' if g["public"]
-            else f'<span class="badge sec">secret</span>'
+            '<span class="badge pub">public</span>' if g["public"]
+            else '<span class="badge sec">secret</span>'
         )
         files = ", ".join(g["files"][:3])
         if len(g["files"]) > 3:
@@ -90,6 +119,13 @@ def build_html(data: dict, username: str) -> str:
         if p.get("avatar_b64") else p["avatar_url"]
     )
 
+    # Most active month display
+    mam = s.get("most_active_month", "—")
+    try:
+        mam_display = datetime.strptime(mam, "%Y-%m").strftime("%b %Y")
+    except Exception:
+        mam_display = mam
+
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -108,27 +144,25 @@ def build_html(data: dict, username: str) -> str:
   body {{
     background: var(--bg); color: var(--text);
     font-family: 'IBM Plex Mono', monospace; font-size: 13px;
-    padding: 0; margin: 0;
   }}
   a {{ color: inherit; text-decoration: none; }}
 
-  .wrap {{ max-width: 520px; margin: 0 auto; padding: 20px 16px; }}
+  .wrap {{ max-width: 560px; margin: 0 auto; padding: 20px 16px; }}
 
   /* ── Profile ── */
   .profile {{ display:flex; gap:16px; align-items:flex-start; margin-bottom:20px; }}
   .avatar {{ width:64px; height:64px; border-radius:50%; border:2px solid var(--border2); flex-shrink:0; }}
-  .profile-info {{ flex:1; }}
-  .profile-name {{ font-family:'Unbounded',sans-serif; font-size:15px; font-weight:700; color:var(--text); }}
+  .profile-info {{ flex:1; min-width:0; }}
+  .profile-name {{ font-family:'Unbounded',sans-serif; font-size:15px; font-weight:700; }}
   .profile-login {{ color:var(--text-dim); font-size:12px; margin-top:2px; }}
-  .profile-bio {{ color:var(--text-dim); font-size:11px; margin-top:6px; line-height:1.5; }}
+  .profile-meta {{ color:var(--text-dim); font-size:11px; margin-top:5px; display:flex; flex-wrap:wrap; gap:10px; }}
+  .profile-meta span {{ display:flex; align-items:center; gap:4px; }}
   .profile-follow {{ color:var(--text-dim); font-size:11px; margin-top:6px; }}
   .profile-follow strong {{ color:var(--text); }}
   .gh-link {{
-    display:inline-flex; align-items:center; gap:6px;
-    margin-top:8px; padding:5px 10px;
-    border:1px solid var(--border2); border-radius:6px;
-    font-size:11px; color:var(--text-dim);
-    transition: border-color 0.15s, color 0.15s;
+    display:inline-flex; align-items:center; gap:6px; margin-top:10px;
+    padding:5px 10px; border:1px solid var(--border2); border-radius:6px;
+    font-size:11px; color:var(--text-dim); transition:border-color .15s, color .15s;
   }}
   .gh-link:hover {{ border-color:var(--accent); color:var(--accent); }}
 
@@ -138,13 +172,18 @@ def build_html(data: dict, username: str) -> str:
     border:1px solid var(--border); border-radius:8px;
     margin-bottom:20px; overflow:hidden;
   }}
+  @media(max-width:480px) {{
+    .stats-bar {{ grid-template-columns:repeat(3,1fr); }}
+    .stats-bar .stat:nth-child(4),
+    .stats-bar .stat:nth-child(5) {{ border-top:1px solid var(--border); }}
+  }}
   .stat {{
     padding:12px 8px; text-align:center;
     border-right:1px solid var(--border);
   }}
   .stat:last-child {{ border-right:none; }}
   .stat-val {{ font-family:'Unbounded',sans-serif; font-size:18px; font-weight:700; color:var(--accent); }}
-  .stat-label {{ color:var(--text-dim); font-size:9px; margin-top:3px; text-transform:uppercase; letter-spacing:0.5px; }}
+  .stat-label {{ color:var(--text-dim); font-size:9px; margin-top:3px; text-transform:uppercase; letter-spacing:.5px; }}
 
   /* ── Section ── */
   .section {{ margin-bottom:20px; }}
@@ -153,15 +192,20 @@ def build_html(data: dict, username: str) -> str:
     color:var(--text-dim); margin-bottom:10px;
     display:flex; align-items:center; gap:8px;
   }}
-  .section-title::after {{
-    content:''; flex:1; height:1px; background:var(--border);
-  }}
+  .section-title::after {{ content:''; flex:1; height:1px; background:var(--border); }}
 
   /* ── Heatmap ── */
-  .heatmap-wrap {{ overflow-x:auto; padding-bottom:4px; }}
+  .heatmap-outer {{ overflow-x:auto; padding-bottom:4px; }}
+  .heatmap-months {{
+    position:relative; height:16px; margin-bottom:4px;
+    width: max-content; min-width: 100%;
+  }}
+  .month-label {{
+    position:absolute; top:0; font-size:10px; color:var(--text-muted); white-space:nowrap;
+  }}
   .heatmap {{
     display:grid;
-    grid-template-rows:repeat(7, {CELL}px);
+    grid-template-rows:repeat(7,{CELL}px);
     grid-auto-flow:column;
     grid-auto-columns:{CELL}px;
     gap:{GAP}px;
@@ -169,38 +213,73 @@ def build_html(data: dict, username: str) -> str:
   }}
   .cell {{
     width:{CELL}px; height:{CELL}px; border-radius:2px;
-    transition:transform 0.1s;
+    cursor:pointer; position:relative; transition:transform .1s;
   }}
-  .cell:hover {{ transform:scale(1.4); z-index:1; }}
-  .cell.empty {{ background:transparent; }}
+  .cell:hover {{ transform:scale(1.5); z-index:10; }}
+  .cell.empty {{ background:transparent; cursor:default; }}
+  .cell.empty:hover {{ transform:none; }}
+
+  /* Tooltip */
+  .cell[data-tip]:hover::after {{
+    content: attr(data-tip);
+    position:absolute; bottom:calc(100% + 6px); left:50%;
+    transform:translateX(-50%);
+    background:#1c2128; color:#e6edf3;
+    font-size:10px; white-space:nowrap;
+    padding:4px 8px; border-radius:4px;
+    border:1px solid var(--border2);
+    pointer-events:none; z-index:100;
+  }}
+  .cell[data-tip]:hover::before {{
+    content:'';
+    position:absolute; bottom:calc(100% + 1px); left:50%;
+    transform:translateX(-50%);
+    border:4px solid transparent;
+    border-top-color:#1c2128;
+    pointer-events:none; z-index:100;
+  }}
+
+  .heat-summary {{
+    display:flex; align-items:center; justify-content:space-between;
+    margin-bottom:8px; flex-wrap:wrap; gap:6px;
+  }}
+  .heat-sub {{ font-size:11px; color:var(--text-dim); }}
   .heat-legend {{
     display:flex; align-items:center; gap:4px;
-    justify-content:flex-end; margin-top:6px;
     font-size:10px; color:var(--text-muted);
   }}
   .heat-legend .cell {{ cursor:default; }}
   .heat-legend .cell:hover {{ transform:none; }}
-  .heat-sub {{ font-size:11px; color:var(--text-dim); margin-bottom:8px; }}
+
+  /* Activity breakdown pills */
+  .activity-pills {{ display:flex; gap:8px; margin-top:8px; flex-wrap:wrap; }}
+  .pill {{
+    font-size:10px; padding:2px 8px; border-radius:10px;
+    border:1px solid var(--border2); color:var(--text-dim);
+  }}
+  .pill span {{ color:var(--accent); font-weight:600; }}
 
   /* ── Language bars ── */
   .lang-row {{
     display:grid; grid-template-columns:110px 1fr 70px;
     align-items:center; gap:10px; margin-bottom:8px;
   }}
-  .lang-name {{ display:flex; align-items:center; gap:6px; color:var(--text); font-size:12px; }}
+  @media(max-width:400px) {{
+    .lang-row {{ grid-template-columns:90px 1fr 55px; }}
+  }}
+  .lang-name {{ display:flex; align-items:center; gap:6px; color:var(--text); font-size:12px; overflow:hidden; }}
+  .lang-name span:last-child {{ white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
   .lang-dot {{ width:10px; height:10px; border-radius:50%; flex-shrink:0; }}
   .lang-bar-wrap {{ background:var(--border); border-radius:3px; height:6px; overflow:hidden; }}
-  .lang-bar {{ height:100%; border-radius:3px; transition:width 0.6s cubic-bezier(.4,0,.2,1); }}
+  .lang-bar {{ height:100%; border-radius:3px; transition:width .6s cubic-bezier(.4,0,.2,1); }}
   .lang-pct {{ color:var(--text-dim); font-size:11px; text-align:right; }}
   .lang-pct span {{ color:var(--text-muted); font-size:10px; }}
 
   /* ── Gist cards ── */
   .gist-card {{
     display:block; padding:12px 14px;
-    border:1px solid var(--border); border-radius:8px;
-    margin-bottom:8px;
-    transition:border-color 0.15s, background 0.15s;
-    cursor:pointer;
+    border:1px solid var(--border); border-radius:8px; margin-bottom:8px;
+    transition:border-color .15s, background .15s;
   }}
   .gist-card:hover {{ border-color:var(--border2); background:var(--surface); }}
   .gist-top {{ display:flex; align-items:center; gap:8px; margin-bottom:4px; }}
@@ -208,18 +287,17 @@ def build_html(data: dict, username: str) -> str:
   .gist-desc {{ flex:1; font-size:12px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
   .badge {{
     font-size:9px; padding:2px 6px; border-radius:10px; flex-shrink:0;
-    text-transform:uppercase; letter-spacing:0.5px; font-weight:600;
+    text-transform:uppercase; letter-spacing:.5px; font-weight:600;
   }}
-  .badge.pub {{ background:rgba(57,211,83,0.1); color:var(--accent); border:1px solid rgba(57,211,83,0.3); }}
-  .badge.sec {{ background:rgba(139,148,158,0.1); color:var(--text-dim); border:1px solid var(--border); }}
+  .badge.pub {{ background:rgba(57,211,83,.1); color:var(--accent); border:1px solid rgba(57,211,83,.3); }}
+  .badge.sec {{ background:rgba(139,148,158,.1); color:var(--text-dim); border:1px solid var(--border); }}
   .gist-files {{ font-size:10px; color:var(--text-dim); margin-bottom:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
   .gist-meta {{ display:flex; gap:12px; font-size:10px; color:var(--text-muted); }}
 
   /* ── Footer ── */
   .footer {{
     text-align:center; color:var(--text-muted); font-size:10px;
-    padding-top:12px; border-top:1px solid var(--border);
-    margin-top:8px;
+    padding-top:12px; border-top:1px solid var(--border); margin-top:8px;
   }}
   .footer a {{ color:var(--accent); }}
 </style>
@@ -233,7 +311,10 @@ def build_html(data: dict, username: str) -> str:
     <div class="profile-info">
       <div class="profile-name">{_esc(p['name'])}</div>
       <div class="profile-login">@{_esc(p['login'])}</div>
-      {'<div class="profile-bio">' + _esc(p['bio']) + '</div>' if p['bio'] else ''}
+      <div class="profile-meta">
+        {('<span>🏢 ' + _esc(p['company']) + '</span>') if p.get('company') else ''}
+        {('<span>📍 ' + _esc(p['location']) + '</span>') if p.get('location') else ''}
+      </div>
       <div class="profile-follow">
         <strong>{p['followers']}</strong> followers &nbsp;·&nbsp;
         <strong>{p['following']}</strong> following
@@ -242,13 +323,12 @@ def build_html(data: dict, username: str) -> str:
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
           <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
           0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13
-          -.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87
-          2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95
-          0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82
-          .64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82
-          .44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15
-          0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48
-          0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+          -.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66
+          .07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15
+          -.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0
+          1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82
+          1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01
+          1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
         </svg>
         View on GitHub
       </a>
@@ -261,24 +341,36 @@ def build_html(data: dict, username: str) -> str:
     <div class="stat"><div class="stat-val">{s['public']}</div><div class="stat-label">Public</div></div>
     <div class="stat"><div class="stat-val">{s['secret']}</div><div class="stat-label">Secret</div></div>
     <div class="stat"><div class="stat-val">{s['total_comments']}</div><div class="stat-label">Comments</div></div>
-    <div class="stat"><div class="stat-val">{s['year_count']}</div><div class="stat-label">This Year</div></div>
+    <div class="stat"><div class="stat-val">{s['year_activity']}</div><div class="stat-label">This Year</div></div>
   </div>
 
   <!-- Heatmap -->
   <div class="section">
     <div class="section-title">Activity</div>
-    <div class="heat-sub">{s['year_count']} gist{"s" if s["year_count"] != 1 else ""} in the last year</div>
-    <div class="heatmap-wrap">
-      <div class="heatmap">{heat_html}</div>
+    <div class="heat-summary">
+      <span class="heat-sub">
+        <strong style="color:var(--text)">{s['year_activity']}</strong>
+        action{'s' if s['year_activity'] != 1 else ''} in the last year
+      </span>
+      <div class="heat-legend">
+        Less
+        <div class="cell" style="background:{hc(0)}"></div>
+        <div class="cell" style="background:{hc(1)}"></div>
+        <div class="cell" style="background:{hc(2)}"></div>
+        <div class="cell" style="background:{hc(3)}"></div>
+        <div class="cell" style="background:{hc(4)}"></div>
+        More
+      </div>
     </div>
-    <div class="heat-legend">
-      Less
-      <div class="cell" style="background:{hc(0)}"></div>
-      <div class="cell" style="background:{hc(1)}"></div>
-      <div class="cell" style="background:{hc(2)}"></div>
-      <div class="cell" style="background:{hc(3)}"></div>
-      <div class="cell" style="background:{hc(4)}"></div>
-      More
+    <div class="activity-pills">
+      <div class="pill">🟢 New &nbsp;<span>{s['year_created']}</span></div>
+      <div class="pill">✏️ Updated &nbsp;<span>{s['year_updated']}</span></div>
+      <div class="pill">🔥 Most active &nbsp;<span>{mam_display}</span></div>
+      <div class="pill">📅 Last active &nbsp;<span>{s['last_active']}</span></div>
+    </div>
+    <div class="heatmap-outer" style="margin-top:12px">
+      <div class="heatmap-months">{month_label_html}</div>
+      <div class="heatmap">{heat_html}</div>
     </div>
   </div>
 
