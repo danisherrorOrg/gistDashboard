@@ -1,0 +1,309 @@
+from datetime import datetime, timezone, timedelta
+from typing import Optional
+LANG_COLORS = {
+    "Python": "#3572A5", "JavaScript": "#f1e05a", "TypeScript": "#2b7489",
+    "Shell": "#89e051", "Ruby": "#701516", "Go": "#00ADD8", "Rust": "#dea584",
+    "C": "#555555", "C++": "#f34b7d", "Java": "#b07219", "Kotlin": "#F18E33",
+    "Swift": "#ffac45", "PHP": "#4F5D95", "HTML": "#e34c26", "CSS": "#563d7c",
+    "Markdown": "#083fa1", "JSON": "#292929", "YAML": "#cb171e", "Other": "#8b949e",
+}
+HEAT_COLORS = ["#161b22", "#0e4429", "#006d32", "#26a641", "#39d353"]
+
+
+def lc(lang): return LANG_COLORS.get(lang, LANG_COLORS["Other"])
+def hc(n): return HEAT_COLORS[min(n, 4)]
+
+
+def build_html(data: dict, username: str) -> str:
+    p = data["profile"]
+    s = data["stats"]
+    heatmap = data["heatmap"]
+    langs = data["languages"]
+    recent = data["recent"]
+
+    # Heatmap grid data
+    today = datetime.now(timezone.utc).date()
+    start = today - timedelta(days=364)
+    dow = start.weekday()
+    start = start - timedelta(days=(dow + 1) % 7)
+
+    CELL, GAP, COLS = 11, 2, 53
+    cells = []
+    for col in range(COLS):
+        for row in range(7):
+            day = start + timedelta(days=col * 7 + row)
+            if day > today:
+                cells.append(f'<div class="cell empty"></div>')
+                continue
+            ds = str(day)
+            count = heatmap.get(ds, 0)
+            color = hc(count)
+            cells.append(
+                f'<div class="cell" style="background:{color}" '
+                f'title="{ds}: {count} gist{"s" if count!=1 else ""}"></div>'
+            )
+
+    heat_html = "\n".join(cells)
+
+    # Language bars
+    total_lang = sum(c for _, c in langs) or 1
+    lang_bars = ""
+    for lang, count in langs:
+        pct = round(count / total_lang * 100, 1)
+        lang_bars += f"""
+        <div class="lang-row">
+          <div class="lang-name">
+            <span class="lang-dot" style="background:{lc(lang)}"></span>{lang}
+          </div>
+          <div class="lang-bar-wrap">
+            <div class="lang-bar" style="width:{pct}%;background:{lc(lang)}"></div>
+          </div>
+          <div class="lang-pct">{count} <span>({pct}%)</span></div>
+        </div>"""
+
+    # Recent gists
+    recent_html = ""
+    for g in recent:
+        pub_badge = (
+            f'<span class="badge pub">public</span>' if g["public"]
+            else f'<span class="badge sec">secret</span>'
+        )
+        files = ", ".join(g["files"][:3])
+        if len(g["files"]) > 3:
+            files += f" +{len(g['files'])-3} more"
+        recent_html += f"""
+        <a class="gist-card" href="{g['url']}" target="_blank" rel="noopener">
+          <div class="gist-top">
+            <span class="gist-lang-dot" style="background:{lc(g['language'])}"></span>
+            <span class="gist-desc">{_esc(g['description'])}</span>
+            {pub_badge}
+          </div>
+          <div class="gist-files">{_esc(files)}</div>
+          <div class="gist-meta">
+            <span>Updated {g['updated_at']}</span>
+            <span>💬 {g['comments']}</span>
+          </div>
+        </a>"""
+
+    avatar_src = (
+        f"data:image/jpeg;base64,{p['avatar_b64']}"
+        if p.get("avatar_b64") else p["avatar_url"]
+    )
+
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>@{p['login']} — Gist Dashboard</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Unbounded:wght@700;900&display=swap" rel="stylesheet">
+<style>
+  :root {{
+    --bg: #0d1117; --surface: #161b22; --surface2: #1c2128;
+    --border: #21262d; --border2: #30363d;
+    --accent: #39d353; --accent2: #26a641;
+    --text: #e6edf3; --text-dim: #8b949e; --text-muted: #484f58;
+  }}
+  * {{ margin:0; padding:0; box-sizing:border-box; }}
+  body {{
+    background: var(--bg); color: var(--text);
+    font-family: 'IBM Plex Mono', monospace; font-size: 13px;
+    padding: 0; margin: 0;
+  }}
+  a {{ color: inherit; text-decoration: none; }}
+
+  .wrap {{ max-width: 520px; margin: 0 auto; padding: 20px 16px; }}
+
+  /* ── Profile ── */
+  .profile {{ display:flex; gap:16px; align-items:flex-start; margin-bottom:20px; }}
+  .avatar {{ width:64px; height:64px; border-radius:50%; border:2px solid var(--border2); flex-shrink:0; }}
+  .profile-info {{ flex:1; }}
+  .profile-name {{ font-family:'Unbounded',sans-serif; font-size:15px; font-weight:700; color:var(--text); }}
+  .profile-login {{ color:var(--text-dim); font-size:12px; margin-top:2px; }}
+  .profile-bio {{ color:var(--text-dim); font-size:11px; margin-top:6px; line-height:1.5; }}
+  .profile-follow {{ color:var(--text-dim); font-size:11px; margin-top:6px; }}
+  .profile-follow strong {{ color:var(--text); }}
+  .gh-link {{
+    display:inline-flex; align-items:center; gap:6px;
+    margin-top:8px; padding:5px 10px;
+    border:1px solid var(--border2); border-radius:6px;
+    font-size:11px; color:var(--text-dim);
+    transition: border-color 0.15s, color 0.15s;
+  }}
+  .gh-link:hover {{ border-color:var(--accent); color:var(--accent); }}
+
+  /* ── Stats bar ── */
+  .stats-bar {{
+    display:grid; grid-template-columns:repeat(5,1fr);
+    border:1px solid var(--border); border-radius:8px;
+    margin-bottom:20px; overflow:hidden;
+  }}
+  .stat {{
+    padding:12px 8px; text-align:center;
+    border-right:1px solid var(--border);
+  }}
+  .stat:last-child {{ border-right:none; }}
+  .stat-val {{ font-family:'Unbounded',sans-serif; font-size:18px; font-weight:700; color:var(--accent); }}
+  .stat-label {{ color:var(--text-dim); font-size:9px; margin-top:3px; text-transform:uppercase; letter-spacing:0.5px; }}
+
+  /* ── Section ── */
+  .section {{ margin-bottom:20px; }}
+  .section-title {{
+    font-size:10px; text-transform:uppercase; letter-spacing:1px;
+    color:var(--text-dim); margin-bottom:10px;
+    display:flex; align-items:center; gap:8px;
+  }}
+  .section-title::after {{
+    content:''; flex:1; height:1px; background:var(--border);
+  }}
+
+  /* ── Heatmap ── */
+  .heatmap-wrap {{ overflow-x:auto; padding-bottom:4px; }}
+  .heatmap {{
+    display:grid;
+    grid-template-rows:repeat(7, {CELL}px);
+    grid-auto-flow:column;
+    grid-auto-columns:{CELL}px;
+    gap:{GAP}px;
+    width:max-content;
+  }}
+  .cell {{
+    width:{CELL}px; height:{CELL}px; border-radius:2px;
+    transition:transform 0.1s;
+  }}
+  .cell:hover {{ transform:scale(1.4); z-index:1; }}
+  .cell.empty {{ background:transparent; }}
+  .heat-legend {{
+    display:flex; align-items:center; gap:4px;
+    justify-content:flex-end; margin-top:6px;
+    font-size:10px; color:var(--text-muted);
+  }}
+  .heat-legend .cell {{ cursor:default; }}
+  .heat-legend .cell:hover {{ transform:none; }}
+  .heat-sub {{ font-size:11px; color:var(--text-dim); margin-bottom:8px; }}
+
+  /* ── Language bars ── */
+  .lang-row {{
+    display:grid; grid-template-columns:110px 1fr 70px;
+    align-items:center; gap:10px; margin-bottom:8px;
+  }}
+  .lang-name {{ display:flex; align-items:center; gap:6px; color:var(--text); font-size:12px; }}
+  .lang-dot {{ width:10px; height:10px; border-radius:50%; flex-shrink:0; }}
+  .lang-bar-wrap {{ background:var(--border); border-radius:3px; height:6px; overflow:hidden; }}
+  .lang-bar {{ height:100%; border-radius:3px; transition:width 0.6s cubic-bezier(.4,0,.2,1); }}
+  .lang-pct {{ color:var(--text-dim); font-size:11px; text-align:right; }}
+  .lang-pct span {{ color:var(--text-muted); font-size:10px; }}
+
+  /* ── Gist cards ── */
+  .gist-card {{
+    display:block; padding:12px 14px;
+    border:1px solid var(--border); border-radius:8px;
+    margin-bottom:8px;
+    transition:border-color 0.15s, background 0.15s;
+    cursor:pointer;
+  }}
+  .gist-card:hover {{ border-color:var(--border2); background:var(--surface); }}
+  .gist-top {{ display:flex; align-items:center; gap:8px; margin-bottom:4px; }}
+  .gist-lang-dot {{ width:10px; height:10px; border-radius:50%; flex-shrink:0; }}
+  .gist-desc {{ flex:1; font-size:12px; color:var(--text); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .badge {{
+    font-size:9px; padding:2px 6px; border-radius:10px; flex-shrink:0;
+    text-transform:uppercase; letter-spacing:0.5px; font-weight:600;
+  }}
+  .badge.pub {{ background:rgba(57,211,83,0.1); color:var(--accent); border:1px solid rgba(57,211,83,0.3); }}
+  .badge.sec {{ background:rgba(139,148,158,0.1); color:var(--text-dim); border:1px solid var(--border); }}
+  .gist-files {{ font-size:10px; color:var(--text-dim); margin-bottom:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
+  .gist-meta {{ display:flex; gap:12px; font-size:10px; color:var(--text-muted); }}
+
+  /* ── Footer ── */
+  .footer {{
+    text-align:center; color:var(--text-muted); font-size:10px;
+    padding-top:12px; border-top:1px solid var(--border);
+    margin-top:8px;
+  }}
+  .footer a {{ color:var(--accent); }}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Profile -->
+  <div class="profile">
+    <img class="avatar" src="{avatar_src}" alt="{p['login']}">
+    <div class="profile-info">
+      <div class="profile-name">{_esc(p['name'])}</div>
+      <div class="profile-login">@{_esc(p['login'])}</div>
+      {'<div class="profile-bio">' + _esc(p['bio']) + '</div>' if p['bio'] else ''}
+      <div class="profile-follow">
+        <strong>{s['followers']}</strong> followers &nbsp;·&nbsp;
+        <strong>{s['following']}</strong> following
+      </div>
+      <a class="gh-link" href="{p['html_url']}" target="_blank">
+        <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">
+          <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38
+          0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13
+          -.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87
+          2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95
+          0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82
+          .64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82
+          .44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15
+          0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48
+          0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0016 8c0-4.42-3.58-8-8-8z"/>
+        </svg>
+        View on GitHub
+      </a>
+    </div>
+  </div>
+
+  <!-- Stats -->
+  <div class="stats-bar">
+    <div class="stat"><div class="stat-val">{s['total']}</div><div class="stat-label">Total</div></div>
+    <div class="stat"><div class="stat-val">{s['public']}</div><div class="stat-label">Public</div></div>
+    <div class="stat"><div class="stat-val">{s['secret']}</div><div class="stat-label">Secret</div></div>
+    <div class="stat"><div class="stat-val">{s['total_comments']}</div><div class="stat-label">Comments</div></div>
+    <div class="stat"><div class="stat-val">{s['year_count']}</div><div class="stat-label">This Year</div></div>
+  </div>
+
+  <!-- Heatmap -->
+  <div class="section">
+    <div class="section-title">Activity</div>
+    <div class="heat-sub">{s['year_count']} gist{"s" if s["year_count"] != 1 else ""} in the last year</div>
+    <div class="heatmap-wrap">
+      <div class="heatmap">{heat_html}</div>
+    </div>
+    <div class="heat-legend">
+      Less
+      <div class="cell" style="background:{hc(0)}"></div>
+      <div class="cell" style="background:{hc(1)}"></div>
+      <div class="cell" style="background:{hc(2)}"></div>
+      <div class="cell" style="background:{hc(3)}"></div>
+      <div class="cell" style="background:{hc(4)}"></div>
+      More
+    </div>
+  </div>
+
+  <!-- Languages -->
+  <div class="section">
+    <div class="section-title">Languages</div>
+    {lang_bars}
+  </div>
+
+  <!-- Recent gists -->
+  <div class="section">
+    <div class="section-title">Recent Gists</div>
+    {recent_html}
+  </div>
+
+  <div class="footer">
+    gist-board &nbsp;·&nbsp;
+    <a href="?user={p['login']}">@{p['login']}</a> &nbsp;·&nbsp;
+    {datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")}
+  </div>
+
+</div>
+</body>
+</html>"""
+
+
+def _esc(s):
+    return str(s).replace("&","&amp;").replace("<","&lt;").replace(">","&gt;").replace('"',"&quot;")
