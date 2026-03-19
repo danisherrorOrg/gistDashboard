@@ -47,7 +47,7 @@ async def fetch_user_data(username: str, token: Optional[str]) -> dict:
         # Fetch avatar as base64
         avatar_b64 = None
         try:
-            av = await client.get(profile["avatar_url"])
+            av = await client.get(profile.get("avatar_url", ""))
             if av.status_code == 200:
                 import base64
                 avatar_b64 = base64.b64encode(av.content).decode()
@@ -63,11 +63,11 @@ async def fetch_user_data(username: str, token: Optional[str]) -> dict:
                 headers=headers,
                 params={"per_page": 100, "page": page},
             )
-            data = resp.json()
-            if not isinstance(data, list) or not data:
+            gists_page = resp.json()
+            if not isinstance(gists_page, list) or not gists_page:
                 break
-            all_gists.extend(data)
-            if len(data) < 100:
+            all_gists.extend(gists_page)
+            if len(gists_page) < 100:
                 break
             page += 1
 
@@ -115,26 +115,30 @@ async def fetch_user_data(username: str, token: Optional[str]) -> dict:
 
     result = {
         "profile": {
-            "login": profile["login"],
-            "name": profile.get("name") or profile["login"],
-            "bio": profile.get("bio") or "",
-            "avatar_url": profile["avatar_url"],
-            "avatar_b64": avatar_b64,
-            "html_url": profile["html_url"],
-            "followers": profile.get("followers", 0),
-            "following": profile.get("following", 0),
+            "login":        profile.get("login", username),
+            "name":         profile.get("name") or profile.get("login", username),
+            "bio":          profile.get("bio") or "",
+            "avatar_url":   profile.get("avatar_url", ""),
+            "avatar_b64":   avatar_b64,
+            "html_url":     profile.get("html_url", f"https://github.com/{username}"),
+            "followers":    profile.get("followers") or 0,
+            "following":    profile.get("following") or 0,
+            "location":     profile.get("location") or "",
+            "company":      profile.get("company") or "",
+            "public_repos": profile.get("public_repos") or 0,
+            "public_gists": profile.get("public_gists") or 0,
         },
         "stats": {
-            "total": len(all_gists),
-            "public": public_count,
-            "secret": len(all_gists) - public_count,
+            "total":          len(all_gists),
+            "public":         public_count,
+            "secret":         len(all_gists) - public_count,
             "total_comments": total_comments,
-            "last_active": all_gists[0]["updated_at"][:10] if all_gists else "—",
-            "year_count": sum(heatmap.values()),
+            "last_active":    all_gists[0]["updated_at"][:10] if all_gists else "—",
+            "year_count":     sum(heatmap.values()),
         },
-        "heatmap": dict(heatmap),
+        "heatmap":   dict(heatmap),
         "languages": top_langs,
-        "recent": recent_clean,
+        "recent":    recent_clean,
     }
 
     _store(username, result)

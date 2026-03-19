@@ -1,5 +1,5 @@
 from datetime import datetime, timezone, timedelta
-from typing import Optional
+
 LANG_COLORS = {
     "Python": "#3572A5", "JavaScript": "#f1e05a", "TypeScript": "#2b7489",
     "Shell": "#89e051", "Ruby": "#701516", "Go": "#00ADD8", "Rust": "#dea584",
@@ -235,8 +235,8 @@ def build_html(data: dict, username: str) -> str:
       <div class="profile-login">@{_esc(p['login'])}</div>
       {'<div class="profile-bio">' + _esc(p['bio']) + '</div>' if p['bio'] else ''}
       <div class="profile-follow">
-        <strong>{s['followers']}</strong> followers &nbsp;·&nbsp;
-        <strong>{s['following']}</strong> following
+        <strong>{p['followers']}</strong> followers &nbsp;·&nbsp;
+        <strong>{p['following']}</strong> following
       </div>
       <a class="gh-link" href="{p['html_url']}" target="_blank">
         <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor">

@@ -1,7 +1,10 @@
+from typing import Optional
+
 from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
-from typing import Optional
+import traceback
+
 from api.github import fetch_user_data
 from api.svg_builder import build_svg
 from api.html_builder import build_html
@@ -16,11 +19,6 @@ def _token(request: Request) -> Optional[str]:
 # ── SVG card — for README / .md embeds ────────────────────────────────────────
 @app.get("/card/{username}")
 async def card(username: str, request: Request):
-    """
-    Returns an SVG card.
-    Usage in markdown:
-      ![Gist Board](https://yourdomain.com/card/torvalds)
-    """
     try:
         data = await fetch_user_data(username, _token(request))
         svg = build_svg(data)
@@ -35,19 +33,13 @@ async def card(username: str, request: Request):
     except ValueError as e:
         return _svg_error(str(e))
     except Exception as e:
+        traceback.print_exc()
         return _svg_error(f"Error: {e}")
 
 
 # ── HTML embed — for iframes / direct links ───────────────────────────────────
 @app.get("/embed/{username}", response_class=HTMLResponse)
 async def embed(username: str, request: Request):
-    """
-    Returns a full HTML dashboard.
-    Usage as iframe:
-      <iframe src="https://yourdomain.com/embed/torvalds" width="520" height="700"/>
-    Direct link:
-      https://yourdomain.com/embed/torvalds
-    """
     try:
         data = await fetch_user_data(username, _token(request))
         html = build_html(data, username)
@@ -59,9 +51,12 @@ async def embed(username: str, request: Request):
             },
         )
     except ValueError as e:
+        traceback.print_exc()
         return HTMLResponse(_html_error(str(e)), status_code=404)
     except Exception as e:
-        return HTMLResponse(_html_error(str(e)), status_code=500)
+        tb = traceback.format_exc()
+        print(tb)  # always print to terminal
+        return HTMLResponse(_html_error(str(e), tb), status_code=500)
 
 
 # ── Raw JSON — for anyone who wants to build on top ───────────────────────────
@@ -69,7 +64,6 @@ async def embed(username: str, request: Request):
 async def api(username: str, request: Request):
     try:
         data = await fetch_user_data(username, _token(request))
-        # strip avatar b64 from api response (too large)
         data["profile"].pop("avatar_b64", None)
         return JSONResponse(
             content=data,
@@ -78,7 +72,8 @@ async def api(username: str, request: Request):
     except ValueError as e:
         return JSONResponse({"error": str(e)}, status_code=404)
     except Exception as e:
-        return JSONResponse({"error": str(e)}, status_code=500)
+        traceback.print_exc()
+        return JSONResponse({"error": str(e), "traceback": traceback.format_exc()}, status_code=500)
 
 
 # ── Homepage ──────────────────────────────────────────────────────────────────
@@ -125,12 +120,10 @@ HOME_HTML = """<!DOCTYPE html>
 <body>
   <h1>Gist<span>Board</span></h1>
   <p class="sub">GitHub Gist dashboard — heatmap, stats, languages & recent gists</p>
-
   <div class="search">
     <input id="u" type="text" placeholder="GitHub username" autocomplete="off" autofocus>
     <button onclick="go()">View →</button>
   </div>
-
   <div class="endpoints">
     <div class="ep-title">Endpoints</div>
     <div class="ep">
@@ -146,7 +139,6 @@ HOME_HTML = """<!DOCTYPE html>
       <div class="desc">Raw JSON data</div>
     </div>
   </div>
-
   <script>
     document.getElementById('u').addEventListener('keydown', e => e.key==='Enter' && go())
     function go(){
@@ -167,9 +159,13 @@ def _svg_error(msg: str) -> Response:
     return Response(content=svg, media_type="image/svg+xml")
 
 
-def _html_error(msg: str) -> str:
+def _html_error(msg: str, tb: str = "") -> str:
+    tb_block = f"<pre style='margin-top:16px;color:#8b949e;font-size:11px;white-space:pre-wrap'>{tb}</pre>" if tb else ""
     return f"""<html><body style="background:#0d1117;color:#f85149;font-family:monospace;padding:40px">
-    <h2>Error</h2><p style="color:#8b949e;margin-top:8px">{msg}</p></body></html>"""
+    <h2>Error</h2>
+    <p style="color:#e6edf3;margin-top:8px">{msg}</p>
+    {tb_block}
+    </body></html>"""
 
 
 if __name__ == "__main__":
