@@ -40,18 +40,14 @@ def build_html(data: dict, username: str) -> str:
             ds = str(day)
             count = heatmap.get(ds, 0)
             detail = heatmap_detail.get(ds, {})
-            created = detail.get("created", 0)
-            updated = detail.get("updated", 0)
             color = hc(count)
 
             # Rich tooltip
             if count == 0:
                 tip = f"{ds}: No activity"
             else:
-                parts = []
-                if created: parts.append(f"{created} new")
-                if updated: parts.append(f"{updated} updated")
-                tip = f"{ds}: {count} action{'s' if count != 1 else ''} ({', '.join(parts)})"
+                gists_touched = detail.get("gists_touched", 0)
+                tip = f"{ds}: {count} commit{'s' if count != 1 else ''} across {gists_touched} gist{'s' if gists_touched != 1 else ''}"
 
             cells.append(
                 f'<div class="cell" style="background:{color}" data-tip="{tip}"></div>'
@@ -111,6 +107,7 @@ def build_html(data: dict, username: str) -> str:
           <div class="gist-meta">
             <span>Updated {g['updated_at']}</span>
             <span>💬 {g['comments']}</span>
+            <span>🔄 {g.get('revisions', 1)} rev{'s' if g.get('revisions',1) != 1 else ''}</span>
           </div>
         </a>"""
 
@@ -341,7 +338,7 @@ def build_html(data: dict, username: str) -> str:
     <div class="stat"><div class="stat-val">{s['public']}</div><div class="stat-label">Public</div></div>
     <div class="stat"><div class="stat-val">{s['secret']}</div><div class="stat-label">Secret</div></div>
     <div class="stat"><div class="stat-val">{s['total_comments']}</div><div class="stat-label">Comments</div></div>
-    <div class="stat"><div class="stat-val">{s['year_activity']}</div><div class="stat-label">This Year</div></div>
+    <div class="stat"><div class="stat-val">{s['year_commits']}</div><div class="stat-label">This Year</div></div>
   </div>
 
   <!-- Heatmap -->
@@ -349,8 +346,8 @@ def build_html(data: dict, username: str) -> str:
     <div class="section-title">Activity</div>
     <div class="heat-summary">
       <span class="heat-sub">
-        <strong style="color:var(--text)">{s['year_activity']}</strong>
-        action{'s' if s['year_activity'] != 1 else ''} in the last year
+        <strong style="color:var(--text)">{s['year_commits']}</strong>
+        action{'s' if s['year_commits'] != 1 else ''} in the last year
       </span>
       <div class="heat-legend">
         Less
@@ -363,9 +360,10 @@ def build_html(data: dict, username: str) -> str:
       </div>
     </div>
     <div class="activity-pills">
-      <div class="pill">🟢 New &nbsp;<span>{s['year_created']}</span></div>
-      <div class="pill">✏️ Updated &nbsp;<span>{s['year_updated']}</span></div>
+      <div class="pill">📝 Commits &nbsp;<span>{s['total_commits']}</span></div>
       <div class="pill">🔥 Most active &nbsp;<span>{mam_display}</span></div>
+      <div class="pill">⚡ Current streak &nbsp;<span>{s['current_streak']}d</span></div>
+      <div class="pill">🏆 Longest streak &nbsp;<span>{s['longest_streak']}d</span></div>
       <div class="pill">📅 Last active &nbsp;<span>{s['last_active']}</span></div>
     </div>
     <div class="heatmap-outer" style="margin-top:12px">
