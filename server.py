@@ -4,7 +4,11 @@ from fastapi import FastAPI, Request, Response
 from fastapi.responses import HTMLResponse, JSONResponse
 import uvicorn
 import traceback
-
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv optional — env vars can be set directly
 from api.github import fetch_user_data
 from api.svg_builder import build_svg
 from api.html_builder import build_html

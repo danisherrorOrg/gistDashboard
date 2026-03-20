@@ -103,7 +103,7 @@ def build_html(data: dict, username: str) -> str:
           <div class="gist-meta">
             <span>Updated {g['updated_at']}</span>
             <span>💬 {g['comments']}</span>
-            <span>🔄 {g.get('revisions', 1)} rev{'s' if g.get('revisions',1) != 1 else ''}</span>
+            <span>🔄 {g.get('commits', 1)} commit{'s' if g.get('commits', 1) != 1 else ''}</span>
           </div>
         </a>"""
 
@@ -367,7 +367,7 @@ def build_html(data: dict, username: str) -> str:
       </div>
     </div>
     <div class="activity-pills">
-      <div class="pill">📝 Commits &nbsp;<span>{s.get('total_file_commits', s.get('total_commits', 0))}</span></div>
+      <div class="pill">📝 Commits &nbsp;<span>{s.get('total_commits', 0)}</span></div>
       <div class="pill">🔥 Most active &nbsp;<span>{mam_display}</span></div>
       <div class="pill">⚡ Current streak &nbsp;<span>{s['current_streak']}d</span></div>
       <div class="pill">🏆 Longest streak &nbsp;<span>{s['longest_streak']}d</span></div>
