@@ -183,25 +183,25 @@ def build_svg(data: dict, theme: str = 'dark', compact: bool = False) -> str:
   <text x="80" y="52" fill="{dim_col}" font-size="12">@{_esc(p["login"])}</text>
   <text x="80" y="70" fill="{dim_col}" font-size="11">{_esc(p["bio"][:60])}</text>
   <text x="{W - 20}" y="36" fill="{dim_col}" font-size="11" text-anchor="end">
-    {s["followers"]} followers · {s["following"]} following
+    {p["followers"]} followers · {p["following"]} following
   </text>
 
   <!-- divider -->
   <line x1="20" y1="{H_HEADER}" x2="{W - 20}" y2="{H_HEADER}" stroke="{border_col}" stroke-width="1"/>
 
   <!-- ── STATS ROW ── -->
-  {_stat_block(20,  H_HEADER + 16, str(s["total"]),          "Total Gists")}
-  {_stat_block(130, H_HEADER + 16, str(s["public"]),         "Public")}
-  {_stat_block(230, H_HEADER + 16, str(s["secret"]),         "Secret")}
-  {_stat_block(330, H_HEADER + 16, str(s["total_comments"]), "Comments")}
-  {_stat_block(420, H_HEADER + 16, str(s["year_count"]),     "This Year")}
+  {_stat_block(20,  H_HEADER + 16, str(s["total"]),          "Total Gists",  text_col, dim_col)}
+  {_stat_block(130, H_HEADER + 16, str(s["public"]),         "Public",       text_col, dim_col)}
+  {_stat_block(230, H_HEADER + 16, str(s["secret"]),         "Secret",       text_col, dim_col)}
+  {_stat_block(330, H_HEADER + 16, str(s["total_comments"]), "Comments",     text_col, dim_col)}
+  {_stat_block(420, H_HEADER + 16, str(s.get("year_commits", s.get("year_count", 0))),     "This Year",    text_col, dim_col)}
 
   <!-- divider -->
   <line x1="20" y1="{H_HEADER + H_STATS}" x2="{W - 20}" y2="{H_HEADER + H_STATS}" stroke="{border_col}" stroke-width="1"/>
 
   <!-- ── HEATMAP ── -->
   <text x="20" y="{H_HEADER + H_STATS + 14}" fill="{dim_col}" font-size="10">
-    {s["year_count"]} gist{'s' if s["year_count"] != 1 else ''} in the last year
+    {s.get("year_commits", s.get("year_count", 0))} gist{'s' if s.get("year_commits", s.get("year_count", 0)) != 1 else ''} in the last year
   </text>
   {''.join(heat_rects)}
 
@@ -228,7 +228,7 @@ def build_svg(data: dict, theme: str = 'dark', compact: bool = False) -> str:
     return svg
 
 
-def _stat_block(x, y, value, label):
+def _stat_block(x, y, value, label, text_col="#e6edf3", dim_col="#8b949e"):
     return (
         f'<text x="{x}" y="{y + 14}" fill="{text_col}" font-size="18" font-weight="700">{value}</text>'
         f'<text x="{x}" y="{y + 28}" fill="{dim_col}" font-size="10">{label}</text>'

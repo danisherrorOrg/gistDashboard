@@ -7,6 +7,7 @@ import time
 import logging
 from collections import defaultdict
 from datetime import datetime, timezone, timedelta
+from cache import cache
 
 log = logging.getLogger("gist-board")
 
@@ -15,8 +16,10 @@ HEADERS = {
     "X-GitHub-Api-Version": "2022-11-28",
 }
 
-_cache: dict = {}
-TTL = 300  # 5 minutes
+# Cache TTLs
+TTL_USER   = 300   # 5 min  — user dashboard
+TTL_GIST   = 600   # 10 min — single gist detail (changes less often)
+TTL_COMPARE = 300  # 5 min
 
 
 # ── Custom exceptions ──────────────────────────────────────────────────────────
@@ -33,19 +36,6 @@ class RateLimitError(GistBoardError):
 
 class NetworkError(GistBoardError):
     pass
-
-
-# ── Cache helpers ──────────────────────────────────────────────────────────────
-
-def _cached(username: str):
-    entry = _cache.get(username.lower())
-    if entry and time.time() - entry["ts"] < TTL:
-        return entry["data"]
-    return None
-
-
-def _store(username: str, data: dict):
-    _cache[username.lower()] = {"data": data, "ts": time.time()}
 
 
 # ── Rate-limit aware response checker ─────────────────────────────────────────
@@ -176,8 +166,9 @@ async def fetch_user_data(username: str, token: Optional[str]) -> dict:
     if len(username) > 39 or not all(c.isalnum() or c == "-" for c in username):
         raise UserNotFoundError(f"'{username}' is not a valid GitHub username.")
 
-    cached = _cached(username)
+    cached = cache.get(f"user:{username.lower()}")
     if cached:
+        print("returning cache data")
         return cached
 
     # Token priority: arg > env var
@@ -408,7 +399,7 @@ async def fetch_user_data(username: str, token: Optional[str]) -> dict:
         "all_gists_full":   [_safe_gist_summary(g, gist_commits) for g in all_gists],
     }
 
-    _store(username, result)
+    cache.set(f"user:{username.lower()}", result, ttl=TTL_USER)
     return result
 
 
@@ -452,6 +443,10 @@ def _streaks(heatmap: dict, today) -> tuple[int, int]:
 
 async def fetch_gist_detail(gist_id: str, token: Optional[str]) -> dict:
     """Full commit timeline for a single gist."""
+    cached = cache.get(f"gist:{gist_id}")
+    if cached:
+        return cached
+
     token = token or os.environ.get("GITHUB_TOKEN")
     headers = HEADERS.copy()
     if token:
@@ -472,7 +467,7 @@ async def fetch_gist_detail(gist_id: str, token: Optional[str]) -> dict:
         commits = await _fetch_gist_commits(client, gist_id, headers)
 
     files = gist.get("files") or {}
-    return {
+    result = {
         "id":          gist.get("id", gist_id),
         "description": gist.get("description") or "(no description)",
         "url":         gist.get("html_url", "#"),
@@ -495,12 +490,19 @@ async def fetch_gist_detail(gist_id: str, token: Optional[str]) -> dict:
         "total_additions":  sum(c.get("additions", 0) for c in commits),
         "total_deletions":  sum(c.get("deletions", 0) for c in commits),
     }
+    cache.set(f"gist:{gist_id}", result, ttl=TTL_GIST)
+    return result
 
 
 # ── Compare two users ──────────────────────────────────────────────────────────
 
 async def fetch_compare_data(user1: str, user2: str, token: Optional[str]) -> dict:
     """Fetch both users in parallel, return merged comparison dict."""
+    key = f"compare:{user1.lower()}:{user2.lower()}"
+    cached = cache.get(key)
+    if cached:
+        return cached
+
     try:
         results = await asyncio.gather(
             fetch_user_data(user1, token),
@@ -517,4 +519,5 @@ async def fetch_compare_data(user1: str, user2: str, token: Optional[str]) -> di
         else:
             out[f"user{i+1}"] = result
 
+    cache.set(key, out, ttl=TTL_COMPARE)
     return out

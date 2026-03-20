@@ -13,6 +13,7 @@ try:
 except ImportError:
     pass
 
+from cache import cache
 from github import (
     fetch_user_data, fetch_gist_detail, fetch_compare_data,
     UserNotFoundError, RateLimitError, GistBoardError, NetworkError,
@@ -24,6 +25,7 @@ from og           import generate_og_image
 
 # Background refresh registry: username -> asyncio.Task
 _refresh_tasks: dict = {}
+
 
 app = FastAPI(title="Gist Board", docs_url=None, redoc_url=None)
 
@@ -40,10 +42,9 @@ def _trigger_background_refresh(username: str, token: Optional[str]):
         return  # already refreshing
     async def _refresh():
         try:
-            from github import _cache
-            _cache.pop(key, None)  # clear so fetch_user_data re-fetches
+            cache.delete(f"user:{key}")
             await fetch_user_data(username, token)
-        except Exception as e:
+        except Exception:
             pass
         finally:
             _refresh_tasks.pop(key, None)
@@ -178,6 +179,29 @@ async def api_analytics(request: Request, username: str):
     except Exception         as e:
         traceback.print_exc()
         return JSONResponse({"error": "internal_error", "message": str(e)}, status_code=500)
+
+
+# ── Cache admin ──────────────────────────────────────────────────────────────
+@app.get("/api/cache/stats")
+async def cache_stats():
+    """Cache health — keys, hit rate, TTLs."""
+    return JSONResponse(cache.stats())
+
+
+@app.delete("/api/cache/flush")
+async def cache_flush():
+    """Flush entire cache."""
+    n = cache.flush()
+    return JSONResponse({"flushed": n})
+
+
+@app.delete("/api/cache/user/{username}")
+async def cache_flush_user(username: str):
+    """Flush all cached data for a specific user."""
+    n  = cache.delete(f"user:{username.lower()}")
+    n += cache.delete(f"compare:{username.lower()}:*")  # best effort
+    n += cache.flush_pattern(f"compare:{username.lower()}:")
+    return JSONResponse({"flushed_keys": n, "username": username})
 
 
 # ── Homepage ──────────────────────────────────────────────────────────────────
