@@ -42,15 +42,11 @@ def build_html(data: dict, username: str) -> str:
             detail = heatmap_detail.get(ds, {})
             color = hc(count)
 
-            # Rich tooltip
-            if count == 0:
-                tip = f"{ds}: No activity"
-            else:
-                gists_touched = detail.get("gists_touched", 0)
-                tip = f"{ds}: {count} commit{'s' if count != 1 else ''} across {gists_touched} gist{'s' if gists_touched != 1 else ''}"
 
+            gt = detail.get("gists_touched", 0)
+            ad = detail.get("additions", 0)
             cells.append(
-                f'<div class="cell" style="background:{color}" data-tip="{tip}"></div>'
+                f'<div class="cell" style="background:{color}" data-tip="{ds}||{count}||{gt}||{ad}"></div>'
             )
 
     heat_html = "\n".join(cells)
@@ -210,30 +206,41 @@ def build_html(data: dict, username: str) -> str:
   }}
   .cell {{
     width:{CELL}px; height:{CELL}px; border-radius:2px;
-    cursor:pointer; position:relative; transition:transform .1s;
+    cursor:pointer; transition:transform .12s, box-shadow .12s;
   }}
-  .cell:hover {{ transform:scale(1.5); z-index:10; }}
+  .cell:hover {{ transform:scale(1.6); box-shadow:0 0 0 1.5px #39d353; }}
   .cell.empty {{ background:transparent; cursor:default; }}
-  .cell.empty:hover {{ transform:none; }}
+  .cell.empty:hover {{ transform:none; box-shadow:none; }}
 
-  /* Tooltip */
-  .cell[data-tip]:hover::after {{
-    content: attr(data-tip);
-    position:absolute; bottom:calc(100% + 6px); left:50%;
-    transform:translateX(-50%);
-    background:#1c2128; color:#e6edf3;
-    font-size:10px; white-space:nowrap;
-    padding:4px 8px; border-radius:4px;
-    border:1px solid var(--border2);
-    pointer-events:none; z-index:100;
+  /* Floating tooltip card */
+  #heat-tooltip {{
+    position:fixed;
+    background:#1c2128;
+    border:1px solid #30363d;
+    border-radius:6px;
+    padding:8px 12px;
+    font-size:11px;
+    color:#e6edf3;
+    pointer-events:none;
+    z-index:9999;
+    opacity:0;
+    transition:opacity .1s;
+    box-shadow:0 8px 24px rgba(0,0,0,.5);
+    white-space:nowrap;
+    min-width:160px;
   }}
-  .cell[data-tip]:hover::before {{
-    content:'';
-    position:absolute; bottom:calc(100% + 1px); left:50%;
-    transform:translateX(-50%);
-    border:4px solid transparent;
-    border-top-color:#1c2128;
-    pointer-events:none; z-index:100;
+  #heat-tooltip.visible {{ opacity:1; }}
+  #heat-tooltip .tip-date {{
+    color:#8b949e; font-size:10px; margin-bottom:4px;
+  }}
+  #heat-tooltip .tip-count {{
+    color:#e6edf3; font-weight:600; font-size:13px;
+  }}
+  #heat-tooltip .tip-detail {{
+    color:#8b949e; font-size:10px; margin-top:3px;
+  }}
+  #heat-tooltip .tip-empty {{
+    color:#484f58; font-size:11px;
   }}
 
   .heat-summary {{
@@ -360,7 +367,7 @@ def build_html(data: dict, username: str) -> str:
       </div>
     </div>
     <div class="activity-pills">
-      <div class="pill">📝 Commits &nbsp;<span>{s['total_commits']}</span></div>
+      <div class="pill">📝 Commits &nbsp;<span>{s.get('total_file_commits', s.get('total_commits', 0))}</span></div>
       <div class="pill">🔥 Most active &nbsp;<span>{mam_display}</span></div>
       <div class="pill">⚡ Current streak &nbsp;<span>{s['current_streak']}d</span></div>
       <div class="pill">🏆 Longest streak &nbsp;<span>{s['longest_streak']}d</span></div>
@@ -391,6 +398,67 @@ def build_html(data: dict, username: str) -> str:
   </div>
 
 </div>
+
+  <!-- Floating heatmap tooltip -->
+  <div id="heat-tooltip">
+    <div class="tip-date" id="tip-date"></div>
+    <div id="tip-body"></div>
+  </div>
+
+  <script>
+    const tooltip = document.getElementById('heat-tooltip');
+    const tipDate = document.getElementById('tip-date');
+    const tipBody = document.getElementById('tip-body');
+
+    document.querySelectorAll('.heatmap .cell:not(.empty)').forEach(cell => {{
+      const raw = cell.dataset.tip || '';
+
+      cell.addEventListener('mouseenter', e => {{
+        // Parse data-tip: "2026-03-01||3||2||1" (date||commits||gists||additions)
+        const parts = raw.split('||');
+        const date   = parts[0] || '';
+        const commits = parseInt(parts[1]) || 0;
+        const gists   = parseInt(parts[2]) || 0;
+        const adds    = parseInt(parts[3]) || 0;
+
+        tipDate.textContent = new Date(date + 'T00:00:00').toLocaleDateString('en-US', {{
+          weekday:'short', year:'numeric', month:'short', day:'numeric'
+        }});
+
+        if (commits === 0) {{
+          tipBody.innerHTML = '<span class="tip-empty">No activity</span>';
+        }} else {{
+          tipBody.innerHTML =
+            '<div class="tip-count">' + commits + ' file commit' + (commits !== 1 ? 's' : '') + '</div>' +
+            '<div class="tip-detail">' + gists + ' gist' + (gists !== 1 ? 's' : '') + ' touched' +
+            (adds > 0 ? ' · +' + adds + ' lines' : '') + '</div>';
+        }}
+
+        tooltip.classList.add('visible');
+        moveTooltip(e);
+      }});
+
+      cell.addEventListener('mousemove', moveTooltip);
+
+      cell.addEventListener('mouseleave', () => {{
+        tooltip.classList.remove('visible');
+      }});
+    }});
+
+    function moveTooltip(e) {{
+      const pad = 14;
+      const tw = tooltip.offsetWidth;
+      const th = tooltip.offsetHeight;
+      let x = e.clientX + pad;
+      let y = e.clientY - th - pad;
+      // keep inside viewport
+      if (x + tw > window.innerWidth - 8)  x = e.clientX - tw - pad;
+      if (y < 8) y = e.clientY + pad;
+      tooltip.style.left = x + 'px';
+      tooltip.style.top  = y + 'px';
+    }}
+  </script>
+
 </body>
 </html>"""
 
