@@ -130,10 +130,14 @@ async def compare(request: Request, user1: str, user2: str):
 @app.get("/og/{username}")
 async def og(request: Request, username: str):
     try:
-        data = await fetch_user_data(username, _token(request))
-        png  = await generate_og_image(data)
-        return Response(content=png, media_type="image/png",
+        data             = await fetch_user_data(username, _token(request))
+        content, mime    = await generate_og_image(data)
+        return Response(content=content, media_type=mime,
             headers={"Cache-Control": "s-maxage=3600", "Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e:
+        return HTMLResponse(_html_error("User not found", str(e), "404"), status_code=404)
+    except RateLimitError as e:
+        return HTMLResponse(_html_error("Rate limit", str(e), "429"), status_code=429)
     except Exception as e:
         traceback.print_exc()
         return Response(content=b"", media_type="image/png", status_code=500)
