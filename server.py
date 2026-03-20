@@ -1,15 +1,17 @@
 from typing import Optional
 
 from fastapi import FastAPI, Request, Response
-from fastapi.responses import HTMLResponse, JSONResponse
-import uvicorn
-import traceback
+import os
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass  # dotenv optional — env vars can be set directly
-from api.github import fetch_user_data
+from fastapi.responses import HTMLResponse, JSONResponse
+import uvicorn
+import traceback
+
+from api.github import fetch_user_data, UserNotFoundError, RateLimitError, GistBoardError, NetworkError
 from api.svg_builder import build_svg
 from api.html_builder import build_html
 
@@ -34,11 +36,15 @@ async def card(username: str, request: Request):
                 "Access-Control-Allow-Origin": "*",
             },
         )
-    except ValueError as e:
-        return _svg_error(str(e))
-    except Exception as e:
+    except UserNotFoundError as e:
+        return _svg_error('User not found', str(e))
+    except RateLimitError as e:
+        return _svg_error('Rate limit exceeded', str(e))
+    except NetworkError as e:
+        return _svg_error('Network error', str(e))
+    except (GistBoardError, Exception) as e:
         traceback.print_exc()
-        return _svg_error(f"Error: {e}")
+        return _svg_error('Error', str(e))
 
 
 # ── HTML embed — for iframes / direct links ───────────────────────────────────
@@ -54,13 +60,17 @@ async def embed(username: str, request: Request):
                 "Access-Control-Allow-Origin": "*",
             },
         )
-    except ValueError as e:
-        traceback.print_exc()
-        return HTMLResponse(_html_error(str(e)), status_code=404)
+    except UserNotFoundError as e:
+        return HTMLResponse(_html_error('User not found', str(e), '404'), status_code=404)
+    except RateLimitError as e:
+        return HTMLResponse(_html_error('Rate limit exceeded', str(e), '429'), status_code=429)
+    except NetworkError as e:
+        return HTMLResponse(_html_error('Network error', str(e), '503'), status_code=503)
+    except GistBoardError as e:
+        return HTMLResponse(_html_error('Error', str(e), '400'), status_code=400)
     except Exception as e:
-        tb = traceback.format_exc()
-        print(tb)  # always print to terminal
-        return HTMLResponse(_html_error(str(e), tb), status_code=500)
+        print(traceback.format_exc())
+        return HTMLResponse(_html_error('Unexpected error', str(e), '500'), status_code=500)
 
 
 # ── Raw JSON — for anyone who wants to build on top ───────────────────────────
@@ -73,11 +83,15 @@ async def api(username: str, request: Request):
             content=data,
             headers={"Access-Control-Allow-Origin": "*"},
         )
-    except ValueError as e:
-        return JSONResponse({"error": str(e)}, status_code=404)
-    except Exception as e:
+    except UserNotFoundError as e:
+        return JSONResponse({"error": "user_not_found", "message": str(e)}, status_code=404)
+    except RateLimitError as e:
+        return JSONResponse({"error": "rate_limit", "message": str(e)}, status_code=429)
+    except NetworkError as e:
+        return JSONResponse({"error": "network_error", "message": str(e)}, status_code=503)
+    except (GistBoardError, Exception) as e:
         traceback.print_exc()
-        return JSONResponse({"error": str(e), "traceback": traceback.format_exc()}, status_code=500)
+        return JSONResponse({"error": "internal_error", "message": str(e)}, status_code=500)
 
 
 # ── Homepage ──────────────────────────────────────────────────────────────────
@@ -154,22 +168,42 @@ HOME_HTML = """<!DOCTYPE html>
 </html>"""
 
 
-def _svg_error(msg: str) -> Response:
-    svg = f"""<svg width="495" height="80" xmlns="http://www.w3.org/2000/svg">
-  <rect width="495" height="80" rx="8" fill="#0d1117"/>
-  <text x="20" y="36" fill="#f85149" font-size="13" font-family="monospace">Error</text>
-  <text x="20" y="56" fill="#8b949e" font-size="11" font-family="monospace">{msg[:60]}</text>
-</svg>"""
+def _svg_error(title: str, msg: str = "") -> Response:
+    short = (msg or title)[:70]
+    svg = (
+        '<svg width="495" height="90" xmlns="http://www.w3.org/2000/svg">'
+        '<rect width="495" height="90" rx="8" fill="#0d1117"/>'
+        '<rect width="495" height="2" rx="1" fill="#f85149"/>'
+        f'<text x="20" y="32" fill="#f85149" font-size="13" font-weight="600" font-family="monospace">{title}</text>'
+        f'<text x="20" y="52" fill="#8b949e" font-size="11" font-family="monospace">{short}</text>'
+        '<text x="20" y="72" fill="#484f58" font-size="10" font-family="monospace">gist-board</text>'
+        '</svg>'
+    )
     return Response(content=svg, media_type="image/svg+xml")
 
 
-def _html_error(msg: str, tb: str = "") -> str:
-    tb_block = f"<pre style='margin-top:16px;color:#8b949e;font-size:11px;white-space:pre-wrap'>{tb}</pre>" if tb else ""
-    return f"""<html><body style="background:#0d1117;color:#f85149;font-family:monospace;padding:40px">
-    <h2>Error</h2>
-    <p style="color:#e6edf3;margin-top:8px">{msg}</p>
-    {tb_block}
-    </body></html>"""
+def _html_error(title: str, msg: str = "", code: str = "") -> str:
+    code_colors = {"404": "#8b949e", "429": "#f0883e", "503": "#f0883e", "500": "#f85149", "400": "#f85149"}
+    color = code_colors.get(code, "#f85149")
+    return (
+        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">'
+        '<style>'
+        'body{background:#0d1117;color:#e6edf3;font-family:"IBM Plex Mono",monospace;'
+        'min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px;margin:0}'
+        '.box{max-width:480px;width:100%}'
+        f'.code{{font-size:64px;font-weight:600;color:{color};line-height:1;margin-bottom:12px}}'
+        '.title{font-size:18px;font-weight:600;margin-bottom:8px}'
+        '.msg{color:#8b949e;font-size:12px;line-height:1.6;margin-bottom:24px}'
+        '.back{display:inline-block;padding:8px 16px;border:1px solid #30363d;border-radius:6px;'
+        'color:#8b949e;font-size:12px;text-decoration:none}'
+        '</style></head><body><div class="box">'
+        f'<div class="code">{code}</div>'
+        f'<div class="title">{title}</div>'
+        f'<div class="msg">{msg}</div>'
+        '<a class="back" href="/">← Back to search</a>'
+        '</div></body></html>'
+    )
 
 
 if __name__ == "__main__":
