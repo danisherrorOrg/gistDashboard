@@ -1,19 +1,29 @@
+import traceback
+import os
+import asyncio
 from typing import Optional
 
 from fastapi import FastAPI, Request, Response
-import os
+from fastapi.responses import HTMLResponse, JSONResponse
+import uvicorn
+
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
-    pass  # dotenv optional — env vars can be set directly
-from fastapi.responses import HTMLResponse, JSONResponse
-import uvicorn
-import traceback
+    pass
 
-from api.github import fetch_user_data, UserNotFoundError, RateLimitError, GistBoardError, NetworkError
-from api.svg_builder import build_svg
-from api.html_builder import build_html
+from github import (
+    fetch_user_data, fetch_gist_detail, fetch_compare_data,
+    UserNotFoundError, RateLimitError, GistBoardError, NetworkError,
+)
+from svg_builder  import build_svg
+from html_builder import build_html
+from analytics    import build_analytics
+from og           import generate_og_image
+
+# Background refresh registry: username -> asyncio.Task
+_refresh_tasks: dict = {}
 
 app = FastAPI(title="Gist Board", docs_url=None, redoc_url=None)
 
@@ -22,74 +32,150 @@ def _token(request: Request) -> Optional[str]:
     return request.query_params.get("token")
 
 
-# ── SVG card — for README / .md embeds ────────────────────────────────────────
+def _trigger_background_refresh(username: str, token: Optional[str]):
+    """Stale-while-revalidate: kick off a background fetch after serving cache."""
+    key = username.lower()
+    task = _refresh_tasks.get(key)
+    if task and not task.done():
+        return  # already refreshing
+    async def _refresh():
+        try:
+            from github import _cache
+            _cache.pop(key, None)  # clear so fetch_user_data re-fetches
+            await fetch_user_data(username, token)
+        except Exception as e:
+            pass
+        finally:
+            _refresh_tasks.pop(key, None)
+    _refresh_tasks[key] = asyncio.create_task(_refresh())
+
+
+# ── SVG card ──────────────────────────────────────────────────────────────────
 @app.get("/card/{username}")
-async def card(username: str, request: Request):
+async def card(request: Request, username: str):
+    """
+    SVG card for README embeds.
+    ?theme=dark|light  ?compact=1  ?token=...
+    """
     try:
-        data = await fetch_user_data(username, _token(request))
-        svg = build_svg(data)
-        return Response(
-            content=svg,
-            media_type="image/svg+xml",
-            headers={
-                "Cache-Control": "s-maxage=3600, stale-while-revalidate=1800",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    except UserNotFoundError as e:
-        return _svg_error('User not found', str(e))
-    except RateLimitError as e:
-        return _svg_error('Rate limit exceeded', str(e))
-    except NetworkError as e:
-        return _svg_error('Network error', str(e))
-    except (GistBoardError, Exception) as e:
+        data   = await fetch_user_data(username, _token(request))
+        theme  = request.query_params.get("theme", "dark")
+        compact = request.query_params.get("compact", "0") == "1"
+        svg    = build_svg(data, theme=theme, compact=compact)
+        return Response(content=svg, media_type="image/svg+xml",
+            headers={"Cache-Control": "s-maxage=3600, stale-while-revalidate=1800",
+                     "Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e: return _svg_error("User not found", str(e))
+    except RateLimitError    as e: return _svg_error("Rate limit", str(e))
+    except NetworkError      as e: return _svg_error("Network error", str(e))
+    except Exception         as e:
         traceback.print_exc()
-        return _svg_error('Error', str(e))
+        return _svg_error("Error", str(e))
 
 
-# ── HTML embed — for iframes / direct links ───────────────────────────────────
+# ── HTML dashboard ────────────────────────────────────────────────────────────
 @app.get("/embed/{username}", response_class=HTMLResponse)
-async def embed(username: str, request: Request):
+async def embed(request: Request, username: str):
     try:
         data = await fetch_user_data(username, _token(request))
+        _trigger_background_refresh(username, _token(request))
         html = build_html(data, username)
-        return HTMLResponse(
-            content=html,
-            headers={
-                "Cache-Control": "s-maxage=3600, stale-while-revalidate=1800",
-                "Access-Control-Allow-Origin": "*",
-            },
-        )
-    except UserNotFoundError as e:
-        return HTMLResponse(_html_error('User not found', str(e), '404'), status_code=404)
-    except RateLimitError as e:
-        return HTMLResponse(_html_error('Rate limit exceeded', str(e), '429'), status_code=429)
-    except NetworkError as e:
-        return HTMLResponse(_html_error('Network error', str(e), '503'), status_code=503)
-    except GistBoardError as e:
-        return HTMLResponse(_html_error('Error', str(e), '400'), status_code=400)
-    except Exception as e:
+        return HTMLResponse(content=html,
+            headers={"Cache-Control": "s-maxage=3600, stale-while-revalidate=1800",
+                     "Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e: return HTMLResponse(_html_error("User not found",    str(e), "404"), status_code=404)
+    except RateLimitError    as e: return HTMLResponse(_html_error("Rate limit exceeded", str(e), "429"), status_code=429)
+    except NetworkError      as e: return HTMLResponse(_html_error("Network error",      str(e), "503"), status_code=503)
+    except GistBoardError    as e: return HTMLResponse(_html_error("Error",              str(e), "400"), status_code=400)
+    except Exception         as e:
         print(traceback.format_exc())
-        return HTMLResponse(_html_error('Unexpected error', str(e), '500'), status_code=500)
+        return HTMLResponse(_html_error("Unexpected error", str(e), "500"), status_code=500)
 
 
-# ── Raw JSON — for anyone who wants to build on top ───────────────────────────
-@app.get("/api/{username}")
-async def api(username: str, request: Request):
+# ── Gist detail ───────────────────────────────────────────────────────────────
+@app.get("/embed/{username}/gist/{gist_id}", response_class=HTMLResponse)
+async def gist_detail(request: Request, username: str, gist_id: str):
+    try:
+        detail = await fetch_gist_detail(gist_id, _token(request))
+        from templates.detail import build_detail_html
+        html = build_detail_html(detail, username)
+        return HTMLResponse(content=html,
+            headers={"Cache-Control": "s-maxage=1800", "Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e: return HTMLResponse(_html_error("Gist not found",   str(e), "404"), status_code=404)
+    except RateLimitError    as e: return HTMLResponse(_html_error("Rate limit",        str(e), "429"), status_code=429)
+    except NetworkError      as e: return HTMLResponse(_html_error("Network error",     str(e), "503"), status_code=503)
+    except Exception         as e:
+        print(traceback.format_exc())
+        return HTMLResponse(_html_error("Unexpected error", str(e), "500"), status_code=500)
+
+
+# ── Compare ───────────────────────────────────────────────────────────────────
+@app.get("/compare/{user1}/{user2}", response_class=HTMLResponse)
+async def compare(request: Request, user1: str, user2: str):
+    try:
+        data = await fetch_compare_data(user1, user2, _token(request))
+        from templates.compare import build_compare_html
+        html = build_compare_html(data, user1, user2)
+        return HTMLResponse(content=html,
+            headers={"Cache-Control": "s-maxage=1800", "Access-Control-Allow-Origin": "*"})
+    except RateLimitError as e: return HTMLResponse(_html_error("Rate limit", str(e), "429"), status_code=429)
+    except NetworkError   as e: return HTMLResponse(_html_error("Network error", str(e), "503"), status_code=503)
+    except Exception      as e:
+        print(traceback.format_exc())
+        return HTMLResponse(_html_error("Unexpected error", str(e), "500"), status_code=500)
+
+
+# ── Open Graph image ──────────────────────────────────────────────────────────
+@app.get("/og/{username}")
+async def og(request: Request, username: str):
     try:
         data = await fetch_user_data(username, _token(request))
-        data["profile"].pop("avatar_b64", None)
-        return JSONResponse(
-            content=data,
-            headers={"Access-Control-Allow-Origin": "*"},
-        )
-    except UserNotFoundError as e:
-        return JSONResponse({"error": "user_not_found", "message": str(e)}, status_code=404)
-    except RateLimitError as e:
-        return JSONResponse({"error": "rate_limit", "message": str(e)}, status_code=429)
-    except NetworkError as e:
-        return JSONResponse({"error": "network_error", "message": str(e)}, status_code=503)
-    except (GistBoardError, Exception) as e:
+        png  = await generate_og_image(data)
+        return Response(content=png, media_type="image/png",
+            headers={"Cache-Control": "s-maxage=3600", "Access-Control-Allow-Origin": "*"})
+    except Exception as e:
+        traceback.print_exc()
+        return Response(content=b"", media_type="image/png", status_code=500)
+
+
+# ── JSON API ──────────────────────────────────────────────────────────────────
+@app.get("/api/{username}")
+async def api_user(request: Request, username: str):
+    try:
+        data = await fetch_user_data(username, _token(request))
+        out  = {k: v for k, v in data.items() if k != "profile" or True}
+        out["profile"].pop("avatar_b64", None)
+        out.pop("all_gists_full", None)
+        return JSONResponse(content=out, headers={"Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e: return JSONResponse({"error": "user_not_found",  "message": str(e)}, status_code=404)
+    except RateLimitError    as e: return JSONResponse({"error": "rate_limit",       "message": str(e)}, status_code=429)
+    except NetworkError      as e: return JSONResponse({"error": "network_error",    "message": str(e)}, status_code=503)
+    except Exception         as e:
+        traceback.print_exc()
+        return JSONResponse({"error": "internal_error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/{username}/gist/{gist_id}")
+async def api_gist(request: Request, username: str, gist_id: str):
+    try:
+        detail = await fetch_gist_detail(gist_id, _token(request))
+        return JSONResponse(content=detail, headers={"Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e: return JSONResponse({"error": "not_found",  "message": str(e)}, status_code=404)
+    except RateLimitError    as e: return JSONResponse({"error": "rate_limit", "message": str(e)}, status_code=429)
+    except Exception         as e:
+        traceback.print_exc()
+        return JSONResponse({"error": "internal_error", "message": str(e)}, status_code=500)
+
+
+@app.get("/api/{username}/analytics")
+async def api_analytics(request: Request, username: str):
+    try:
+        data      = await fetch_user_data(username, _token(request))
+        analytics = build_analytics(data)
+        return JSONResponse(content=analytics, headers={"Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e: return JSONResponse({"error": "user_not_found", "message": str(e)}, status_code=404)
+    except RateLimitError    as e: return JSONResponse({"error": "rate_limit",     "message": str(e)}, status_code=429)
+    except Exception         as e:
         traceback.print_exc()
         return JSONResponse({"error": "internal_error", "message": str(e)}, status_code=500)
 
@@ -97,75 +183,31 @@ async def api(username: str, request: Request):
 # ── Homepage ──────────────────────────────────────────────────────────────────
 @app.get("/", response_class=HTMLResponse)
 async def home():
-    return HTMLResponse(HOME_HTML)
+    return HTMLResponse(_HOME_HTML)
 
 
-HOME_HTML = """<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Gist Board</title>
-<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Unbounded:wght@700;900&display=swap" rel="stylesheet">
-<style>
-  *{margin:0;padding:0;box-sizing:border-box}
-  body{background:#0d1117;color:#e6edf3;font-family:'IBM Plex Mono',monospace;
-       min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px}
-  h1{font-family:'Unbounded',sans-serif;font-size:clamp(28px,6vw,56px);font-weight:900;
-     color:#e6edf3;line-height:1;margin-bottom:8px;text-align:center}
-  h1 span{color:#39d353}
-  .sub{color:#8b949e;font-size:12px;margin-bottom:48px;text-align:center}
-  .search{display:flex;gap:8px;width:100%;max-width:420px}
-  input{flex:1;background:#161b22;border:1px solid #30363d;border-radius:6px;
-        color:#e6edf3;font-family:'IBM Plex Mono',monospace;font-size:13px;
-        padding:12px 14px;outline:none;transition:border-color .2s}
-  input:focus{border-color:#39d353;box-shadow:0 0 0 3px rgba(57,211,83,.15)}
-  input::placeholder{color:#484f58}
-  button{background:#238636;border:1px solid #2ea043;border-radius:6px;
-         color:#fff;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
-         padding:12px 18px;cursor:pointer;transition:background .15s;white-space:nowrap}
-  button:hover{background:#2ea043}
-  .endpoints{margin-top:48px;width:100%;max-width:520px}
-  .ep-title{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
-  .ep{background:#161b22;border:1px solid #21262d;border-radius:6px;
-      padding:12px 14px;margin-bottom:8px;font-size:11px}
-  .ep .method{color:#39d353;margin-right:8px}
-  .ep .path{color:#e6edf3}
-  .ep .desc{color:#8b949e;margin-top:4px}
-  .ep code{color:#79c0ff;background:#0d1117;padding:2px 5px;border-radius:3px;font-size:10px}
-</style>
-</head>
-<body>
-  <h1>Gist<span>Board</span></h1>
-  <p class="sub">GitHub Gist dashboard — heatmap, stats, languages & recent gists</p>
-  <div class="search">
-    <input id="u" type="text" placeholder="GitHub username" autocomplete="off" autofocus>
-    <button onclick="go()">View →</button>
-  </div>
-  <div class="endpoints">
-    <div class="ep-title">Endpoints</div>
-    <div class="ep">
-      <span class="method">GET</span><span class="path">/card/{username}</span>
-      <div class="desc">SVG card for README: <code>![](https://yourdomain.com/card/torvalds)</code></div>
-    </div>
-    <div class="ep">
-      <span class="method">GET</span><span class="path">/embed/{username}</span>
-      <div class="desc">HTML dashboard — direct link or <code>&lt;iframe&gt;</code></div>
-    </div>
-    <div class="ep">
-      <span class="method">GET</span><span class="path">/api/{username}</span>
-      <div class="desc">Raw JSON data</div>
-    </div>
-  </div>
-  <script>
-    document.getElementById('u').addEventListener('keydown', e => e.key==='Enter' && go())
-    function go(){
-      const u = document.getElementById('u').value.trim()
-      if(u) window.location.href = '/embed/' + u
-    }
-  </script>
-</body>
-</html>"""
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def _html_error(title: str, msg: str = "", code: str = "") -> str:
+    colors = {"404":"#8b949e","429":"#f0883e","503":"#f0883e","500":"#f85149","400":"#f85149"}
+    color  = colors.get(code, "#f85149")
+    return (
+        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
+        '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">'
+        '<style>body{background:#0d1117;color:#e6edf3;font-family:"IBM Plex Mono",monospace;'
+        'min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px;margin:0}'
+        '.box{max-width:480px;width:100%}'
+        f'.code{{font-size:64px;font-weight:600;color:{color};line-height:1;margin-bottom:12px}}'
+        '.title{font-size:18px;font-weight:600;margin-bottom:8px}'
+        '.msg{color:#8b949e;font-size:12px;line-height:1.6;margin-bottom:24px}'
+        '.back{display:inline-block;padding:8px 16px;border:1px solid #30363d;border-radius:6px;'
+        'color:#8b949e;font-size:12px;text-decoration:none}'
+        '.back:hover{border-color:#39d353;color:#39d353}'
+        '</style></head><body><div class="box">'
+        f'<div class="code">{code}</div><div class="title">{title}</div>'
+        f'<div class="msg">{msg}</div>'
+        '<a class="back" href="/">← Back to search</a>'
+        '</div></body></html>'
+    )
 
 
 def _svg_error(title: str, msg: str = "") -> Response:
@@ -182,28 +224,84 @@ def _svg_error(title: str, msg: str = "") -> Response:
     return Response(content=svg, media_type="image/svg+xml")
 
 
-def _html_error(title: str, msg: str = "", code: str = "") -> str:
-    code_colors = {"404": "#8b949e", "429": "#f0883e", "503": "#f0883e", "500": "#f85149", "400": "#f85149"}
-    color = code_colors.get(code, "#f85149")
-    return (
-        '<!DOCTYPE html><html><head><meta charset="UTF-8">'
-        '<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&display=swap" rel="stylesheet">'
-        '<style>'
-        'body{background:#0d1117;color:#e6edf3;font-family:"IBM Plex Mono",monospace;'
-        'min-height:100vh;display:flex;align-items:center;justify-content:center;padding:40px;margin:0}'
-        '.box{max-width:480px;width:100%}'
-        f'.code{{font-size:64px;font-weight:600;color:{color};line-height:1;margin-bottom:12px}}'
-        '.title{font-size:18px;font-weight:600;margin-bottom:8px}'
-        '.msg{color:#8b949e;font-size:12px;line-height:1.6;margin-bottom:24px}'
-        '.back{display:inline-block;padding:8px 16px;border:1px solid #30363d;border-radius:6px;'
-        'color:#8b949e;font-size:12px;text-decoration:none}'
-        '</style></head><body><div class="box">'
-        f'<div class="code">{code}</div>'
-        f'<div class="title">{title}</div>'
-        f'<div class="msg">{msg}</div>'
-        '<a class="back" href="/">← Back to search</a>'
-        '</div></body></html>'
-    )
+_HOME_HTML = """<!DOCTYPE html>
+<html lang="en"><head>
+<meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Gist Board</title>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=Unbounded:wght@700;900&display=swap" rel="stylesheet">
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{background:#0d1117;color:#e6edf3;font-family:'IBM Plex Mono',monospace;
+       min-height:100vh;display:flex;flex-direction:column;align-items:center;justify-content:center;padding:40px}
+  h1{font-family:'Unbounded',sans-serif;font-size:clamp(28px,6vw,56px);font-weight:900;
+     line-height:1;margin-bottom:8px;text-align:center}
+  h1 span{color:#39d353}
+  .sub{color:#8b949e;font-size:12px;margin-bottom:48px;text-align:center}
+  .search{display:flex;gap:8px;width:100%;max-width:480px;margin-bottom:16px}
+  input{flex:1;background:#161b22;border:1px solid #30363d;border-radius:6px;
+        color:#e6edf3;font-family:'IBM Plex Mono',monospace;font-size:13px;
+        padding:12px 14px;outline:none;transition:border-color .2s}
+  input:focus{border-color:#39d353;box-shadow:0 0 0 3px rgba(57,211,83,.12)}
+  input::placeholder{color:#484f58}
+  button{background:#238636;border:1px solid #2ea043;border-radius:6px;
+         color:#fff;font-family:'IBM Plex Mono',monospace;font-size:13px;font-weight:600;
+         padding:12px 18px;cursor:pointer;white-space:nowrap}
+  button:hover{background:#2ea043}
+  .compare-row{display:flex;gap:8px;width:100%;max-width:480px;align-items:center}
+  .compare-row input{flex:1}
+  .compare-row span{color:#484f58;font-size:12px;flex-shrink:0}
+  .btn-secondary{background:transparent;border:1px solid #30363d;color:#8b949e;
+                 padding:10px 14px;border-radius:6px;font-family:'IBM Plex Mono',monospace;
+                 font-size:12px;cursor:pointer;white-space:nowrap}
+  .btn-secondary:hover{border-color:#39d353;color:#39d353}
+  .eps{margin-top:48px;width:100%;max-width:540px}
+  .ep-title{color:#8b949e;font-size:10px;text-transform:uppercase;letter-spacing:1px;margin-bottom:12px}
+  .ep{background:#161b22;border:1px solid #21262d;border-radius:6px;padding:12px 14px;margin-bottom:8px;font-size:11px}
+  .ep .m{color:#39d353;margin-right:8px}.ep .p{color:#e6edf3}
+  .ep .d{color:#8b949e;margin-top:4px}
+  code{color:#79c0ff;background:#0d1117;padding:2px 5px;border-radius:3px;font-size:10px}
+</style></head><body>
+  <h1>Gist<span>Board</span></h1>
+  <p class="sub">GitHub Gist dashboard — activity, analytics & more</p>
+
+  <div class="search">
+    <input id="u" type="text" placeholder="GitHub username" autocomplete="off" autofocus>
+    <button onclick="go()">View →</button>
+  </div>
+
+  <div class="compare-row">
+    <input id="u1" type="text" placeholder="user one">
+    <span>vs</span>
+    <input id="u2" type="text" placeholder="user two">
+    <button class="btn-secondary" onclick="compare()">Compare</button>
+  </div>
+
+  <div class="eps">
+    <div class="ep-title">Endpoints</div>
+    <div class="ep"><span class="m">GET</span><span class="p">/embed/{username}</span>
+      <div class="d">Full dashboard</div></div>
+    <div class="ep"><span class="m">GET</span><span class="p">/embed/{username}/gist/{id}</span>
+      <div class="d">Gist detail + commit timeline</div></div>
+    <div class="ep"><span class="m">GET</span><span class="p">/compare/{user1}/{user2}</span>
+      <div class="d">Side-by-side comparison</div></div>
+    <div class="ep"><span class="m">GET</span><span class="p">/card/{username}?theme=dark&compact=1</span>
+      <div class="d">SVG for README: <code>![](https://yourdomain.com/card/username)</code></div></div>
+    <div class="ep"><span class="m">GET</span><span class="p">/og/{username}</span>
+      <div class="d">Open Graph PNG for link previews</div></div>
+    <div class="ep"><span class="m">GET</span><span class="p">/api/{username}/analytics</span>
+      <div class="d">Raw JSON analytics data</div></div>
+  </div>
+
+  <script>
+    document.getElementById('u').addEventListener('keydown', e => e.key==='Enter' && go())
+    function go(){ const u=document.getElementById('u').value.trim(); if(u) location.href='/embed/'+u }
+    function compare(){
+      const u1=document.getElementById('u1').value.trim()
+      const u2=document.getElementById('u2').value.trim()
+      if(u1&&u2) location.href='/compare/'+u1+'/'+u2
+    }
+  </script>
+</body></html>"""
 
 
 if __name__ == "__main__":

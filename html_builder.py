@@ -1,4 +1,5 @@
 from datetime import datetime, timezone, timedelta
+from analytics import build_analytics
 
 LANG_COLORS = {
     "Python": "#3572A5", "JavaScript": "#f1e05a", "TypeScript": "#2b7489",
@@ -93,7 +94,7 @@ def build_html(data: dict, username: str) -> str:
         if len(g["files"]) > 3:
             files += f" +{len(g['files'])-3} more"
         recent_html += f"""
-        <a class="gist-card" href="{g['url']}" target="_blank" rel="noopener">
+        <a class="gist-card" href="/embed/{username}/gist/{g['id']}">
           <div class="gist-top">
             <span class="gist-lang-dot" style="background:{lc(g['language'])}"></span>
             <span class="gist-desc">{_esc(g['description'])}</span>
@@ -118,6 +119,51 @@ def build_html(data: dict, username: str) -> str:
         mam_display = datetime.strptime(mam, "%Y-%m").strftime("%b %Y")
     except Exception:
         mam_display = mam
+
+    # Analytics
+    analytics    = build_analytics(data)
+    dow_data     = analytics["day_of_week"]    # [{ day, commits }]
+    month_data   = analytics["by_month"]       # [{ month, commits }]
+    aging        = analytics["aging"]
+    peak_day     = analytics["peak_day"]
+    peak_month   = analytics["peak_month"]
+
+    # Day-of-week chart bars
+    max_dow = max((d["commits"] for d in dow_data), default=1) or 1
+    dow_bars = ""
+    for d in dow_data:
+        h = max(int(d["commits"] / max_dow * 60), 2) if d["commits"] else 2
+        active = " active" if d["day"] == peak_day else ""
+        tip = d["day"] + ": " + str(d["commits"])
+        lbl = d["day"][:1]
+        dow_bars += f'<div class="chart-bar-wrap"><div class="chart-bar{active}" style="height:{h}px" title="{tip}"></div><div class="chart-label">{lbl}</div></div>'
+
+    # Month chart bars
+    max_mo = max((m["commits"] for m in month_data), default=1) or 1
+    mo_bars = ""
+    for m in month_data:
+        h = max(int(m["commits"] / max_mo * 60), 2) if m["commits"] else 2
+        active = " active" if m["month"] == peak_month else ""
+        tip = m["month"] + ": " + str(m["commits"])
+        lbl = m["month"][:1]
+        mo_bars += f'<div class="chart-bar-wrap"><div class="chart-bar{active}" style="height:{h}px" title="{tip}"></div><div class="chart-label">{lbl}</div></div>'
+
+    # Aging report rows (stale only, max 5)
+    aging_rows = ""
+    for g in aging["stale"][:5]:
+        gid  = g["id"]
+        desc = _esc(g["description"])
+        age  = g["age_days"]
+        nc   = g["commits"]
+        cs   = "s" if nc != 1 else ""
+        aging_rows += (
+            f'<a class="aging-row" href="/embed/{username}/gist/{gid}">'
+            f'<span class="aging-desc">{desc}</span>'
+            f'<span class="aging-meta">{age}d ago · {nc} commit{cs}</span>'
+            f'</a>'
+        )
+    if not aging_rows:
+        aging_rows = '<div class="aging-empty">No stale gists — all recently active 🎉</div>'
 
     return f"""<!DOCTYPE html>
 <html lang="en">
@@ -298,6 +344,45 @@ def build_html(data: dict, username: str) -> str:
   .gist-files {{ font-size:10px; color:var(--text-dim); margin-bottom:6px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }}
   .gist-meta {{ display:flex; gap:12px; font-size:10px; color:var(--text-muted); }}
 
+  /* ── Charts ── */
+  .charts-grid {{ display:grid; grid-template-columns:1fr 1fr; gap:12px; }}
+  @media(max-width:480px) {{ .charts-grid {{ grid-template-columns:1fr; }} }}
+  .chart-wrap {{ border:1px solid var(--border); border-radius:8px; padding:14px; }}
+  .chart-title {{ font-size:10px; color:var(--text-dim); text-transform:uppercase;
+                  letter-spacing:.5px; margin-bottom:10px; }}
+  .chart-bars {{ display:flex; align-items:flex-end; gap:4px; height:70px; }}
+  .chart-bar-wrap {{ display:flex; flex-direction:column; align-items:center; gap:3px; flex:1; }}
+  .chart-bar {{ width:100%; border-radius:2px 2px 0 0; background:var(--border2);
+                transition:background .15s; min-height:2px; }}
+  .chart-bar.active {{ background:var(--accent); }}
+  .chart-bar-wrap:hover .chart-bar {{ background:#4d9fff; }}
+  .chart-label {{ font-size:9px; color:var(--text-muted); }}
+
+  /* ── Aging ── */
+  .aging-row {{ display:flex; justify-content:space-between; align-items:center;
+                padding:8px 12px; border-bottom:1px solid rgba(30,30,46,.6);
+                text-decoration:none; transition:background .1s; }}
+  .aging-row:last-child {{ border-bottom:none; }}
+  .aging-row:hover {{ background:rgba(255,255,255,.02); }}
+  .aging-desc {{ font-size:12px; color:var(--text); white-space:nowrap; overflow:hidden;
+                 text-overflow:ellipsis; max-width:300px; }}
+  .aging-meta {{ font-size:10px; color:var(--text-muted); flex-shrink:0; margin-left:10px; }}
+  .aging-empty {{ padding:16px; text-align:center; color:var(--text-muted); font-size:11px; }}
+  .aging-container {{ border:1px solid var(--border); border-radius:8px; overflow:hidden; }}
+
+  /* ── Skeleton loading ── */
+  .skeleton {{ background:var(--surface); border-radius:8px; }}
+  @keyframes shimmer {{
+    0%   {{ background-position:-400px 0; }}
+    100% {{ background-position: 400px 0; }}
+  }}
+  .skeleton-pulse {{
+    background:linear-gradient(90deg,var(--surface) 25%,var(--border) 50%,var(--surface) 75%);
+    background-size:400px 100%;
+    animation:shimmer 1.4s infinite;
+    border-radius:4px;
+  }}
+
   /* ── Footer ── */
   .footer {{
     text-align:center; color:var(--text-muted); font-size:10px;
@@ -389,6 +474,32 @@ def build_html(data: dict, username: str) -> str:
   <div class="section">
     <div class="section-title">Recent Gists</div>
     {recent_html}
+  </div>
+
+  <!-- Analytics -->
+  <div class="section">
+    <div class="section-title">Analytics</div>
+    <div class="charts-grid">
+      <div class="chart-wrap">
+        <div class="chart-title">Day of Week · peak: {peak_day}</div>
+        <div class="chart-bars">{dow_bars}</div>
+      </div>
+      <div class="chart-wrap">
+        <div class="chart-title">By Month · peak: {peak_month}</div>
+        <div class="chart-bars">{mo_bars}</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Aging report -->
+  <div class="section">
+    <div class="section-title">
+      Stale Gists
+      <span style="color:var(--text-muted);font-size:10px;margin-left:4px;font-weight:normal">
+        ({aging['counts']['stale']} of {aging['counts']['total']} not touched in 6+ months)
+      </span>
+    </div>
+    <div class="aging-container">{aging_rows}</div>
   </div>
 
   <div class="footer">

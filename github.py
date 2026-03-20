@@ -401,14 +401,32 @@ async def fetch_user_data(username: str, token: Optional[str]) -> dict:
             "longest_streak":    longest_streak,
             "current_streak":    current_streak,
         },
-        "heatmap":        heatmap,
-        "heatmap_detail": heatmap_detail,
-        "languages":      top_langs,
-        "recent":         recent_clean,
+        "heatmap":          heatmap,
+        "heatmap_detail":   heatmap_detail,
+        "languages":        top_langs,
+        "recent":           recent_clean,
+        "all_gists_full":   [_safe_gist_summary(g, gist_commits) for g in all_gists],
     }
 
     _store(username, result)
     return result
+
+
+def _safe_gist_summary(g: dict, gist_commits: dict) -> dict:
+    files = g.get("files") or {}
+    return {
+        "id":          g.get("id", ""),
+        "description": g.get("description") or "",
+        "url":         g.get("html_url", "#"),
+        "public":      g.get("public", True),
+        "created_at":  (g.get("created_at") or "")[:10],
+        "updated_at":  (g.get("updated_at") or "")[:10],
+        "comments":    g.get("comments") or 0,
+        "files":       [f["filename"] for f in files.values() if f and f.get("filename")],
+        "file_count":  len(files),
+        "language":    next((f.get("language") for f in files.values() if f and f.get("language")), "Other"),
+        "commits":     len(gist_commits.get(g.get("id", ""), [])),
+    }
 
 
 def _streaks(heatmap: dict, today) -> tuple[int, int]:
@@ -428,3 +446,75 @@ def _streaks(heatmap: dict, today) -> tuple[int, int]:
             streak = 0
         d += timedelta(days=1)
     return longest, current
+
+
+# ── Gist detail ────────────────────────────────────────────────────────────────
+
+async def fetch_gist_detail(gist_id: str, token: Optional[str]) -> dict:
+    """Full commit timeline for a single gist."""
+    token = token or os.environ.get("GITHUB_TOKEN")
+    headers = HEADERS.copy()
+    if token:
+        headers["Authorization"] = f"token {token}"
+
+    async with httpx.AsyncClient(timeout=20) as client:
+        # Gist metadata
+        try:
+            resp = await client.get(
+                f"https://api.github.com/gists/{gist_id}", headers=headers
+            )
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            raise NetworkError(f"Cannot reach GitHub: {e}")
+        _check_response(resp, f"GET /gists/{gist_id}")
+        gist = resp.json()
+
+        # All commits
+        commits = await _fetch_gist_commits(client, gist_id, headers)
+
+    files = gist.get("files") or {}
+    return {
+        "id":          gist.get("id", gist_id),
+        "description": gist.get("description") or "(no description)",
+        "url":         gist.get("html_url", "#"),
+        "public":      gist.get("public", True),
+        "created_at":  (gist.get("created_at") or "")[:10],
+        "updated_at":  (gist.get("updated_at") or "")[:10],
+        "comments":    gist.get("comments") or 0,
+        "owner":       (gist.get("owner") or {}).get("login", ""),
+        "files": [
+            {
+                "filename": f.get("filename", ""),
+                "language": f.get("language") or "Other",
+                "size":     f.get("size") or 0,
+                "raw_url":  f.get("raw_url", ""),
+            }
+            for f in files.values() if f
+        ],
+        "commits": commits,  # [{ day, additions, deletions, total }]
+        "total_commits":    len(commits),
+        "total_additions":  sum(c.get("additions", 0) for c in commits),
+        "total_deletions":  sum(c.get("deletions", 0) for c in commits),
+    }
+
+
+# ── Compare two users ──────────────────────────────────────────────────────────
+
+async def fetch_compare_data(user1: str, user2: str, token: Optional[str]) -> dict:
+    """Fetch both users in parallel, return merged comparison dict."""
+    try:
+        results = await asyncio.gather(
+            fetch_user_data(user1, token),
+            fetch_user_data(user2, token),
+            return_exceptions=True,
+        )
+    except Exception as e:
+        raise GistBoardError(f"Compare failed: {e}")
+
+    out = {}
+    for i, (uname, result) in enumerate(zip([user1, user2], results)):
+        if isinstance(result, Exception):
+            out[f"user{i+1}"] = {"error": str(result), "username": uname}
+        else:
+            out[f"user{i+1}"] = result
+
+    return out
