@@ -93,6 +93,28 @@ async def embed(request: Request, username: str):
         return HTMLResponse(_html_error("Unexpected error", str(e), "500"), status_code=500)
 
 
+# ── Full gist list ───────────────────────────────────────────────────────────
+@app.get("/gists/{username}", response_class=HTMLResponse)
+async def gist_list(request: Request, username: str,
+                    page: int = 1, per_page: int = 20,
+                    lang: str = "", visibility: str = "all", q: str = ""):
+    try:
+        data = await fetch_user_data(username, _token(request))
+        _trigger_background_refresh(username, _token(request))
+        from templates.gist_list import build_gist_list_html
+        html = build_gist_list_html(data, username, page=page, per_page=per_page,
+                                    lang_filter=lang, visibility=visibility, q=q)
+        return HTMLResponse(content=html,
+            headers={"Cache-Control": "s-maxage=300", "Access-Control-Allow-Origin": "*"})
+    except UserNotFoundError as e: return HTMLResponse(_html_error("User not found",     str(e), "404"), status_code=404)
+    except RateLimitError    as e: return HTMLResponse(_html_error("Rate limit exceeded", str(e), "429"), status_code=429)
+    except NetworkError      as e: return HTMLResponse(_html_error("Network error",       str(e), "503"), status_code=503)
+    except GistBoardError    as e: return HTMLResponse(_html_error("Error",               str(e), "400"), status_code=400)
+    except Exception         as e:
+        print(traceback.format_exc())
+        return HTMLResponse(_html_error("Unexpected error", str(e), "500"), status_code=500)
+
+
 # ── Gist detail ───────────────────────────────────────────────────────────────
 @app.get("/embed/{username}/gist/{gist_id}", response_class=HTMLResponse)
 async def gist_detail(request: Request, username: str, gist_id: str):
@@ -308,6 +330,8 @@ _HOME_HTML = """<!DOCTYPE html>
     <div class="ep-title">Endpoints</div>
     <div class="ep"><span class="m">GET</span><span class="p">/embed/{username}</span>
       <div class="d">Full dashboard</div></div>
+    <div class="ep"><span class="m">GET</span><span class="p">/gists/{username}</span>
+      <div class="d">Full gist list — paginated, filterable, searchable</div></div>
     <div class="ep"><span class="m">GET</span><span class="p">/embed/{username}/gist/{id}</span>
       <div class="d">Gist detail + commit timeline</div></div>
     <div class="ep"><span class="m">GET</span><span class="p">/compare/{user1}/{user2}</span>

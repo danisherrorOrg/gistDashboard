@@ -472,7 +472,10 @@ def build_html(data: dict, username: str) -> str:
 
   <!-- Recent gists -->
   <div class="section">
-    <div class="section-title">Recent Gists</div>
+    <div class="section-title" style="justify-content:space-between">
+      <span>Recent Gists</span>
+      <a href="/gists/{username}" style="font-size:10px;color:var(--accent);border:1px solid rgba(57,211,83,.3);padding:2px 8px;border-radius:4px;font-weight:normal;letter-spacing:0;text-transform:none">View all {s['total']} →</a>
+    </div>
     {recent_html}
   </div>
 
